@@ -1,11 +1,12 @@
-// Builds the Lucide icons as components in the Penpot file that is open.
+// Builds the Lucide icons as components in the Penpot file that is open, and
+// brings a file built earlier up to another Lucide version.
 //
 // This is the body of an async function that runs in Penpot's plugin context,
 // where `penpot` is the Plugin API. The Penpot MCP server runs it as it is with
 // its `execute_code` tool. Run it again and again until it returns
-// `{ done: true }`: each run builds what fits into `budgetMs` and takes up
-// where the last one stopped, because Penpot grows slower with every shape on
-// a page and a single long run would not come back.
+// `{ done: true }`: each run does what fits into `budgetMs` and takes up where
+// the last one stopped, because Penpot grows slower with every shape on a page
+// and a single long run would not come back.
 
 const CONFIG = {
   // The version of the package lucide-static the icons are taken from.
@@ -17,7 +18,7 @@ const CONFIG = {
     ["p", "s"],
     ["t", "z"],
   ],
-  // How long one run builds before it returns, in milliseconds.
+  // How long one run works before it returns, in milliseconds.
   budgetMs: 8000,
   // Icons in one row of a letter's board.
   columns: 24,
@@ -31,6 +32,11 @@ const SIZE = 24;
 const PITCH = 48;
 const PADDING = 48;
 const BOARD_GAP = 96;
+const BOARD_WIDTH = PADDING * 2 + CONFIG.columns * PITCH - (PITCH - SIZE);
+
+// Where an icon keeps the signature of the drawing it was built from.
+const NAMESPACE = "lucide";
+const DRAWING = "drawing";
 
 // `storage` outlives a run on the Penpot MCP server. Elsewhere the icons are
 // fetched once for each run.
@@ -63,6 +69,18 @@ function svgOf(nodes) {
   );
 }
 
+// Tells one drawing of an icon from another, so that a run sees which icons
+// Lucide has drawn anew since the file was built.
+function signature(nodes) {
+  const text = JSON.stringify(nodes);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${text.length}-${hash.toString(16)}`;
+}
+
 function foregroundToken() {
   const catalog = penpot.library.local.tokens;
   let set = catalog.sets.find((candidate) => candidate.name === CONFIG.tokenSet);
@@ -86,16 +104,37 @@ function letterBoards(page) {
   return boards;
 }
 
-function buildIcon(name, nodes, token, parent, left, top) {
+function boardHeight(count) {
+  const rows = Math.max(1, Math.ceil(count / CONFIG.columns));
+  return PADDING * 2 + rows * PITCH - (PITCH - SIZE);
+}
+
+function slotOf(index) {
+  return {
+    left: PADDING + (index % CONFIG.columns) * PITCH,
+    top: PADDING + Math.floor(index / CONFIG.columns) * PITCH,
+  };
+}
+
+// Penpot's positions carry the noise of floating point numbers.
+function differs(value, expected) {
+  return Math.abs(value - expected) > 0.5;
+}
+
+// An icon is finished once it is a component. A board that is none is what an
+// interrupted run left behind.
+function isFinished(icon) {
+  return icon.isComponentMainInstance();
+}
+
+function place(icon, board, slot) {
+  icon.x = board.x + slot.left;
+  icon.y = board.y + slot.top;
+}
+
+// Draws the icon into its board and notes which drawing it is.
+function draw(icon, nodes, token) {
   const drawing = penpot.createShapeFromSvg(svgOf(nodes));
-  const icon = penpot.createBoard();
-  icon.resize(SIZE, SIZE);
-  icon.name = name;
-  icon.fills = [];
-  icon.clipContent = false;
-  parent.appendChild(icon);
-  icon.x = parent.x + left;
-  icon.y = parent.y + top;
   drawing.x = icon.x;
   drawing.y = icon.y;
 
@@ -135,87 +174,146 @@ function buildIcon(name, nodes, token, parent, left, top) {
   } catch {
     // Already gone.
   }
+  icon.setSharedPluginData(NAMESPACE, DRAWING, signature(nodes));
+}
+
+function buildIcon(name, nodes, token, board, slot) {
+  const icon = penpot.createBoard();
+  icon.resize(SIZE, SIZE);
+  icon.name = name;
+  icon.fills = [];
+  icon.clipContent = false;
+  board.appendChild(icon);
+  place(icon, board, slot);
+  draw(icon, nodes, token);
   penpot.library.local.createComponent([icon]).name = name;
 }
 
-// An icon is finished once it is a component. A board that is none is what an
-// interrupted run left behind.
-function isFinished(icon) {
-  return icon.isComponentMainInstance();
+// The component stays the one it was, so every copy in a design keeps its
+// link, and only the drawing inside is exchanged.
+function redrawIcon(icon, nodes, token) {
+  for (const shape of [...icon.children]) shape.remove();
+  draw(icon, nodes, token);
 }
 
 const started = Date.now();
+const spent = () => Date.now() - started > CONFIG.budgetMs;
 const icons = await loadIcons();
 const token = foregroundToken();
 const names = Object.keys(icons).sort();
+const signatures = new Map(names.map((name) => [name, signature(icons[name])]));
 
-// What each page is to hold, and what it lacks.
-const plan = CONFIG.pages.map((range) => {
+// What a page is to hold and what stands in the way: icons that are missing,
+// icons Lucide has drawn anew, icons and boards that are not in their place.
+// An icon Lucide no longer has is left alone, moved behind the others of its
+// letter and reported, because designs may still use it.
+function survey(range) {
   const [from, to] = range;
-  const letters = [...new Set(names.map((name) => name[0]))].filter((letter) => letter >= from && letter <= to).sort();
+  const inRange = (letter) => letter >= from && letter <= to;
   const page = penpot.currentFile.pages.find((candidate) => candidate.name === pageName(range));
   const boards = page ? letterBoards(page) : new Map();
-  const missing = [];
-  for (const letter of letters) {
-    const present = new Set((boards.get(letter)?.children ?? []).filter(isFinished).map((child) => child.name));
-    for (const name of names) if (name[0] === letter && !present.has(name)) missing.push(name);
-  }
-  return { range, letters, page, missing };
-});
+  const letters = [...new Set([...names.map((name) => name[0]), ...boards.keys()])].filter(inRange).sort();
 
-const next = plan.find((entry) => entry.missing.length > 0);
-if (!next) return { done: true, version: CONFIG.version, icons: names.length };
+  const work = { range, page, missing: [], stale: [], misplaced: [], boards: [], dropped: [] };
+  let top = 0;
+  for (const letter of letters) {
+    const board = boards.get(letter);
+    const present = new Map((board?.children ?? []).filter(isFinished).map((icon) => [icon.name, icon]));
+    const dropped = [...present.keys()].filter((name) => !signatures.has(name)).sort();
+    const order = [...names.filter((name) => name[0] === letter), ...dropped];
+    const height = boardHeight(order.length);
+
+    const inPlace =
+      board &&
+      !differs(board.x, 0) &&
+      !differs(board.y, top) &&
+      !differs(board.width, BOARD_WIDTH) &&
+      !differs(board.height, height);
+    if (!inPlace) work.boards.push({ letter, top, height });
+
+    order.forEach((name, index) => {
+      const icon = present.get(name);
+      const slot = slotOf(index);
+      if (!icon) {
+        work.missing.push({ name, letter, slot });
+        return;
+      }
+      if (signatures.has(name) && icon.getSharedPluginData(NAMESPACE, DRAWING) !== signatures.get(name)) {
+        work.stale.push({ name, icon });
+      }
+      if (differs(icon.parentX, slot.left) || differs(icon.parentY, slot.top)) {
+        work.misplaced.push({ icon, letter, slot });
+      }
+    });
+    work.dropped.push(...dropped);
+    top += height + BOARD_GAP;
+  }
+  return work;
+}
+
+const count = (work) => work.missing.length + work.stale.length + work.misplaced.length + work.boards.length;
+
+const plan = CONFIG.pages.map(survey);
+const dropped = plan.flatMap((work) => work.dropped);
+const first = plan.find((work) => count(work) > 0);
+if (!first) return { done: true, version: CONFIG.version, icons: names.length, dropped };
 
 // The page of this run: the one that exists, or the empty first page of a new
 // file, or a new one.
-let page = next.page;
+let page = first.page;
 if (!page) {
   const untouched = penpot.currentFile.pages.find(
     (candidate) => candidate.root.children.length === 0 && /^Page \d+$/.test(candidate.name),
   );
   page = untouched ?? penpot.createPage();
-  page.name = pageName(next.range);
+  page.name = pageName(first.range);
 }
 if (penpot.currentPage.id !== page.id) await penpot.openPage(page);
 page = penpot.currentPage;
 
-// A board for each letter, one below the other.
+// Only the page that is open can be changed, so it is looked at once more now
+// that it is.
 const boards = letterBoards(page);
 for (const board of boards.values()) {
   for (const icon of [...board.children]) if (!isFinished(icon)) icon.remove();
 }
-let top = 0;
-for (const letter of next.letters) {
-  const count = names.filter((name) => name[0] === letter).length;
-  const rows = Math.ceil(count / CONFIG.columns);
-  const height = PADDING * 2 + rows * PITCH - (PITCH - SIZE);
-  if (!boards.has(letter)) {
-    const board = penpot.createBoard();
+const work = survey(first.range);
+
+for (const { letter, top, height } of work.boards) {
+  let board = boards.get(letter);
+  if (!board) {
+    board = penpot.createBoard();
     board.name = letter.toUpperCase();
-    board.x = 0;
-    board.y = top;
-    board.resize(PADDING * 2 + CONFIG.columns * PITCH - (PITCH - SIZE), height);
     board.fills = [{ fillColor: "#FFFFFF", fillOpacity: 1 }];
     boards.set(letter, board);
   }
-  top += height + BOARD_GAP;
+  board.x = 0;
+  board.y = top;
+  board.resize(BOARD_WIDTH, height);
 }
 
 let built = 0;
-for (const name of next.missing) {
-  if (Date.now() - started > CONFIG.budgetMs) break;
-  const ofLetter = names.filter((candidate) => candidate[0] === name[0]);
-  const index = ofLetter.indexOf(name);
-  buildIcon(
-    name,
-    icons[name],
-    token,
-    boards.get(name[0]),
-    PADDING + (index % CONFIG.columns) * PITCH,
-    PADDING + Math.floor(index / CONFIG.columns) * PITCH,
-  );
+for (const { name, letter, slot } of work.missing) {
+  if (spent()) break;
+  buildIcon(name, icons[name], token, boards.get(letter), slot);
   built += 1;
 }
 
-const remaining = plan.reduce((sum, entry) => sum + entry.missing.length, 0) - built;
-return { done: remaining === 0, page: page.name, built, remaining };
+let redrawn = 0;
+for (const { name, icon } of work.stale) {
+  if (spent()) break;
+  redrawIcon(icon, icons[name], token);
+  redrawn += 1;
+}
+
+let moved = 0;
+for (const { icon, letter, slot } of work.misplaced) {
+  if (spent()) break;
+  place(icon, boards.get(letter), slot);
+  moved += 1;
+}
+
+const elsewhere = plan.filter((other) => other !== first).reduce((sum, other) => sum + count(other), 0);
+const here = count(work) - work.boards.length - built - redrawn - moved;
+const remaining = elsewhere + here;
+return { done: remaining === 0, page: page.name, built, redrawn, moved, remaining, dropped };

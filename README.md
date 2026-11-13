@@ -38,11 +38,22 @@ A release carries the version of Lucide it holds: release `v1.61.0` holds the ic
 2. Set `version` in `CONFIG` at the head of `generate.js`.
 3. Run the script, and run it again until it returns `{ done: true }`.
 
-One run builds what fits into `budgetMs` and the next takes up where it stopped. An icon that is already there is left as it is, so the script also adds what a newer Lucide version brought. It does not remove or redraw an icon that Lucide dropped or changed; for those, start from an empty file.
+One run does what fits into `budgetMs` and the next takes up where it stopped.
 
 The script loads the icons from `unpkg.com`. It was written and run with Penpot 2.19.1.
 
 The pages "Cover" and "Read me" are drawn by hand. They name the version and the number of icons, and are brought up to date with each release.
+
+## Bring a file up to another Lucide version
+
+Set `version` and run the script in the file you built earlier, again until it returns `{ done: true }`. It compares the file with that version of Lucide:
+
+- **An icon Lucide added** is built.
+- **An icon Lucide has drawn anew** keeps its component and gets the new drawing inside it, so every copy in a design keeps its link. A copy you had resized shows the new drawing at 24 by 24 and needs resizing once more.
+- **Every icon** is put in its alphabetical place.
+- **An icon Lucide dropped** is left alone, because designs may still use it. It is moved behind the others of its letter, and the result names it under `dropped`. Delete it by hand once nothing uses it.
+
+The script tells one drawing from another by a note it leaves on each icon. An icon without that note is drawn anew.
 
 ## License
 
