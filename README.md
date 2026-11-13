@@ -10,7 +10,7 @@ This is not an official project of Lucide or of Penpot.
 
 ## Use it
 
-1. Download `Lucide Icons.penpot` from the [latest release](https://github.com/shiroink-dev/penpot-lucide-icons/releases/latest).
+1. Download `lucide-icons.penpot` from the [latest release](https://github.com/shiroink-dev/penpot-lucide-icons/releases/latest).
 2. Import it into a Penpot project.
 3. Open it, and in the menu beside the file name choose **File > Add as Shared Library**.
 4. In the file you design in, open **Libraries** in the assets panel and connect "Lucide Icons".
